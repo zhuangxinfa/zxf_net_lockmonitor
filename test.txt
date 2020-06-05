@@ -1,0 +1,108 @@
+#include <iostream>
+#include <map>
+
+#include "tensorflow/cc/ops/image_ops.h"
+#include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/core/framework/graph.pb.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/graph/default_device.h"
+#include "tensorflow/core/graph/graph_def_builder.h"
+#include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/public/session.h"
+
+using namespace std ;
+using namespace tensorflow;
+using tensorflow::Tensor;
+using tensorflow::Status;
+using tensorflow::string;
+using tensorflow::int32;
+
+
+//从文件名中读取数据
+Status ReadTensorFromImageFile(string file_name, const int input_height,
+                               const int input_width,
+                               vector<Tensor>* out_tensors) {
+    auto root = Scope::NewRootScope();
+    using namespace ops;
+
+    auto file_reader = ops::ReadFile(root.WithOpName("file_reader"),file_name);
+    const int wanted_channels = 1;
+    Output image_reader;
+    std::size_t found = file_name.find(".png");
+    //判断文件格式
+    if (found!=std::string::npos) {
+        image_reader = DecodePng(root.WithOpName("png_reader"), file_reader,DecodePng::Channels(wanted_channels));
+    } 
+    else {
+        image_reader = DecodeJpeg(root.WithOpName("jpeg_reader"), file_reader,DecodeJpeg::Channels(wanted_channels));
+    }
+    // 下面几步是读取图片并处理
+    auto float_caster =Cast(root.WithOpName("float_caster"), image_reader, DT_FLOAT);
+    auto dims_expander = ExpandDims(root, float_caster, 0);
+    auto resized = ResizeBilinear(root, dims_expander,Const(root.WithOpName("resize"), {input_height, input_width}));
+    // Div(root.WithOpName(output_name), Sub(root, resized, {input_mean}),{input_std});
+    Transpose(root.WithOpName("transpose"),resized,{0,2,1,3});
+
+    GraphDef graph;
+    root.ToGraphDef(&graph);
+
+    unique_ptr<Session> session(NewSession(SessionOptions()));
+    session->Create(graph);
+    session->Run({}, {"transpose"}, {}, out_tensors);//Run，获取图片数据保存到Tensor中
+
+    return Status::OK();
+}
+
+int main(int argc, char* argv[]) {
+
+    string graph_path = "aov_crnn.pb";
+    GraphDef graph_def;
+    //读取模型文件
+    if (!ReadBinaryProto(Env::Default(), graph_path, &graph_def).ok()) {
+        cout << "Read model .pb failed"<<endl;
+        return -1;
+    }
+
+    //新建session
+    unique_ptr<Session> session;
+    SessionOptions sess_opt;
+    sess_opt.config.mutable_gpu_options()->set_allow_growth(true);
+    (&session)->reset(NewSession(sess_opt));
+    if (!session->Create(graph_def).ok()) {
+        cout<<"Create graph failed"<<endl;
+        return -1;
+    }
+
+    //读取图像到inputs中
+    int input_height = 40;
+    int input_width = 240;
+    vector<Tensor> inputs;
+    // string image_path(argv[1]);
+    string image_path("test.jpg");
+    if (!ReadTensorFromImageFile(image_path, input_height, input_width,&inputs).ok()) {
+        cout<<"Read image file failed"<<endl;
+        return -1;
+    }
+
+    vector<Tensor> outputs;
+    string input = "inputs_sq";
+    string output = "results_sq";//graph中的输入节点和输出节点，需要预先知道
+
+    pair<string,Tensor>img(input,inputs[0]);
+    Status status = session->Run({img},{output}, {}, &outputs);//Run,得到运行结果，存到outputs中
+    if (!status.ok()) {
+        cout<<"Running model failed"<<endl;
+        cout<<status.ToString()<<endl;
+        return -1;
+    }
+
+
+    //得到模型运行结果
+    Tensor t = outputs[0];        
+    auto tmap = t.tensor<int64, 2>(); 
+    int output_dim = t.shape().dim_size(1); 
+
+
+    return 0;
+}

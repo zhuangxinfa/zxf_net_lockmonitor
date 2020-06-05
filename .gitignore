@@ -1,0 +1,9 @@
+*.jgp
+*.jpeg
+*./png
+*./zip
+*.pb
+
+logs/
+log/
+pic/
